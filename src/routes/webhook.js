@@ -26,15 +26,13 @@ router.post('/vapi', async (req, res) => {
 
   console.log(`[WEBHOOK] event=${eventType} call=${callId}`);
 
-  // 2. IMMEDIATELY insert raw payload (safety net) — idempotent
+  // 2. IMMEDIATELY insert raw payload (safety net) — plain INSERT, no conflict
   try {
     await sql`
       INSERT INTO webhook_events_raw (event_type, call_id, raw_payload, processed)
       VALUES (${eventType}, ${callId}, ${sql.json(payload)}, false)
-      ON CONFLICT (call_id, event_type) DO NOTHING
     `;
   } catch (err) {
-    // Log but still return 200 — don't lose the event silently
     console.error('[WEBHOOK] Raw insert failed:', err.message);
   }
 
@@ -53,6 +51,7 @@ router.post('/vapi', async (req, res) => {
         UPDATE webhook_events_raw
         SET processed = true, processed_at = NOW()
         WHERE call_id = ${callId} AND event_type = ${eventType}
+        AND processed = false
       `;
     }
   } catch (err) {
