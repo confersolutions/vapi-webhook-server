@@ -3,6 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { sql } = require('../db');
+const { processOutcome } = require('./outcome');
 
 const RECORDINGS_DIR = process.env.RECORDINGS_DIR || '/opt/vapi-recordings';
 
@@ -184,6 +185,16 @@ async function processEndOfCallReport(payload) {
   // ─── Check for DNC opt-outs ───────────────────────────────────────────
 
   await checkAndFlagDNC(callId, endedReason, fullTranscript, callAttempt);
+
+  // ─── Outcome processing (campaign_contacts update) ───────────
+
+  try {
+    await processOutcome(callAttempt.id, callId);
+  } catch (err) {
+    // Outcome processing failure is non-fatal — call data is already saved
+    // Can be retried via: SELECT * FROM call_attempts WHERE outcome_processed = FALSE
+    console.error(`[PROCESSOR] Outcome processing failed (non-fatal): ${err.message}`);
+  }
 
   console.log(`[PROCESSOR] ✅ call_attempt ${callAttempt.id} fully processed`);
 }
