@@ -1,0 +1,77 @@
+name: GBrain Sync
+on:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+concurrency:
+  group: gbrain-sync-${{ github.repository }}
+  cancel-in-progress: true
+jobs:
+  gbrain-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Write the sync script (self-contained; canonical copy in GBrain Code deploy/ci)
+        run: |
+          cat > /tmp/gbrain_ci_sync.py <<'PYEOF'
+          import json, os, re, subprocess, sys, urllib.parse, urllib.request
+          from collections import Counter
+          EXT_LANG = {".ts":"TypeScript",".tsx":"TypeScript",".js":"JavaScript",".jsx":"JavaScript",".py":"Python",".go":"Go",".rs":"Rust",".java":"Java",".rb":"Ruby",".sql":"SQL",".sh":"Shell",".php":"PHP",".cs":"C#",".md":"Markdown",".yml":"YAML",".yaml":"YAML",".tf":"HCL",".html":"HTML",".css":"CSS"}
+          IGNORE = {".git","node_modules",".venv","dist","build","__pycache__",".next","vendor"}
+          ENTRY = ("main.py","app.py","index.ts","index.js","main.ts","server.ts","server.js","main.go","package.json","pyproject.toml","Dockerfile","docker-compose.yml")
+          def walk():
+              langs,dirs,entries,files=Counter(),Counter(),[],0
+              for root,ds,fs in os.walk("."):
+                  ds[:]=[d for d in ds if d not in IGNORE]; rel=root.lstrip("./"); top=rel.split("/")[0] if rel else "."
+                  for f in fs:
+                      files+=1; ext=os.path.splitext(f)[1].lower()
+                      if ext in EXT_LANG:
+                          langs[EXT_LANG[ext]]+=1
+                          if top!=".": dirs[top]+=1
+                      if f in ENTRY: entries.append(os.path.join(rel,f).lstrip("/") or f)
+              return langs,dirs,entries,files
+          def readme():
+              for n in ("README.md","readme.md","README.MD"):
+                  if os.path.exists(n):
+                      for para in re.split(r"\n\s*\n",open(n,encoding="utf-8",errors="replace").read()):
+                          p=para.strip()
+                          if p and not p.startswith("#") and not p.startswith("!["): return re.sub(r"\s+"," ",p)[:500]
+              return ""
+          def git(*a): return subprocess.run(["git",*a],capture_output=True,text=True).stdout.strip()
+          def page(repo):
+              langs,dirs,entries,files=walk(); commit=(os.environ.get("GITHUB_SHA") or git("rev-parse","HEAD"))[:12]
+              when=git("show","-s","--format=%cI","HEAD"); name=repo.split("/")[-1]
+              cl=os.environ.get("GBRAIN_CLIENT","Confer"); pr=os.environ.get("GBRAIN_PROJECT","-"); ty=os.environ.get("GBRAIN_TYPE","-")
+              stack=", ".join(f"{l} ({c})" for l,c in langs.most_common(6)) or "-"
+              L=["---","type: repository_intelligence",f"repo: {name}",f"client: {cl}",f"project: {pr}",f"repo_type: {ty}",f"github: {repo}",f"indexed_commit: {commit}",f"indexed_at: {when}","source: gbrain-code-ci","tags: [code-intelligence, repository, ci-synced]","generated_by: Confer CI (confer-gbrain-sync)","note: Additive; refreshed on every merge. Does not overwrite business knowledge.","---","",f"# {name} - repository intelligence","",f"> **Freshness:** reflects commit `{commit}` ({when}). Auto-synced by CI on merge.","",f"- **Client:** {cl}",f"- **Project:** {pr}",f"- **Type:** {ty}",f"- **GitHub:** `{repo}`",f"- **Languages:** {stack}",f"- **Files:** {files}",""]
+              if readme(): L+=["## Purpose (from README)",readme(),""]
+              L+=["## Main modules (top dirs by code files)"]+([f"- `{d}/` - {c} files" for d,c in dirs.most_common(8)] or ["- _flat_"])
+              L+=["","## Entry points / config"]+([f"- `{e}`" for e in sorted(set(entries))[:10]] or ["- _none_"])
+              L+=["","## For AI agents","Registered Confer repo. Deep symbol/call-graph intelligence is maintained by GBrain Code on S1; this is the CI-synced summary as of the commit above.",""]
+              return "\n".join(L)+"\n"
+          def main():
+              repo=os.environ["GITHUB_REPOSITORY"]; source=os.environ.get("GBRAIN_SOURCE","confer-code")
+              slug="code-intel-"+re.sub(r"[^a-z0-9]+","-",repo.split("/")[-1].lower()).strip("-")
+              data=urllib.parse.urlencode({"grant_type":"client_credentials","client_id":os.environ["GBRAIN_CLIENT_ID"],"client_secret":os.environ["GBRAIN_CLIENT_SECRET"]}).encode()
+              tok=json.loads(urllib.request.urlopen(urllib.request.Request(os.environ["GBRAIN_TOKEN_URL"],data=data,method="POST",headers={"Content-Type":"application/x-www-form-urlencoded"}),timeout=25).read())["access_token"]
+              body=json.dumps({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_page","arguments":{"slug":slug,"content":page(repo),"source":source}}}).encode()
+              txt=urllib.request.urlopen(urllib.request.Request(os.environ["GBRAIN_MCP_URL"],data=body,method="POST",headers={"Authorization":"Bearer "+tok,"Content-Type":"application/json","Accept":"application/json, text/event-stream"}),timeout=40).read().decode("utf-8","replace")
+              if "created_or_updated" not in txt: raise SystemExit("put_page failed: "+txt[:200])
+              print(f"GBrain synced: {slug} -> {source} ({commit if (commit:=os.environ.get('GITHUB_SHA','')[:12]) else ''})")
+          main()
+          PYEOF
+      - name: Sync repository intelligence into GBrain (best-effort)
+        env:
+          GBRAIN_SOURCE: "confer-code"
+          GBRAIN_CLIENT: "Confer"
+          GBRAIN_PROJECT: "Shared Utilities/Tools"
+          GBRAIN_TYPE: "utility"
+          GBRAIN_CLIENT_ID: ${{ secrets.GBRAIN_CLIENT_ID }}
+          GBRAIN_CLIENT_SECRET: ${{ secrets.GBRAIN_CLIENT_SECRET }}
+          GBRAIN_TOKEN_URL: https://brain-api.confersolutions.ai/token
+          GBRAIN_MCP_URL: https://brain-api.confersolutions.ai/mcp
+        run: python3 /tmp/gbrain_ci_sync.py || echo "::warning::GBrain sync non-fatal exit $?"
